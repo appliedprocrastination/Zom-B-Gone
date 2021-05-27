@@ -4,7 +4,7 @@
  * SDA = A4
  * SCL = A5
  * SQW = D3
- * The code further assumes a rotary encoder conencted to the following pins:
+ * The code further assumes a rotary encoder connected to the following pins:
  * CLK = A0
  * DT = A1
  * SW = A2
@@ -19,8 +19,6 @@
 #include <RTClib.h>
 #include <Wire.h>
 
-ClickEncoder *encoder;
-int16_t last, value, manual_pwm_value;
 volatile boolean MANUAL_OVERRIDE, OVERRIDE_SENSE_FLAG;
 
 static const uint8_t ENC_CLK_PIN = A0;
@@ -33,7 +31,15 @@ static const uint8_t BUTTON_LED_PIN = 5;
 static const uint8_t LED_ENABLE_PIN = 6;
 
 static const int BUTTON_LED_PWM_VALUE = 255; //TODO: Set this value lower if the button is too bright.
-static const int MAX_ENCODER_VALUE = 1024;   //This value is mapped down to 255 before being used. TODO: Tune this value in case the encoder feels too slow.
+static const int MAX_ENCODER_VALUE = 50;   //This value is mapped down to 255 before being used. TODO: Tune this value in case the encoder feels too slow.
+
+static const unsigned long IRQ_TIMEOUT = 500; //Timeout that applies universally to all button based ISRs.
+
+unsigned long interrupt_timeout = 0; //Timekeeping-variable to handle the IRQ_TIMEOUT
+
+ClickEncoder *encoder;
+int16_t last_enc_value, enc_value, manual_pwm_value, last_manual_pwm_value;
+
 RTC_DS3231 rtc;
 RTC_Millis rtc_millis;
 
@@ -58,15 +64,15 @@ struct AlarmSettings
   uint8_t END_SECOND = 0;
   // The duration of the dimming process (both from start time to 100% and from end time to 0%)
   uint8_t DURATION_HOURS = 0;
-  uint8_t DURATION_MINUTES = 0;
-  uint8_t DURATION_SECONDS = 30;
+  uint8_t DURATION_MINUTES = 30;
+  uint8_t DURATION_SECONDS = 0;
   //Dimming settings
   uint8_t MIN_PWM = 0;
   uint8_t MAX_PWM = 255;
 };
 
 const struct AlarmSettings ALARM_SETTINGS;
-int auto_pwm_value;
+int auto_pwm_value, pwm_dimming_delta;
 DateTime timestamp_prev_pwm_change;
 TimeSpan s_between_pwm_increments;
 boolean ALARM1_FLAG, ALARM2_FLAG, dimming_up, dimming_down;
@@ -79,10 +85,7 @@ void timerIsr()
 
 void onAlarmIsr()
 {
-  ALARM1_FLAG = rtc.alarmFired(1);
-  rtc.clearAlarm(1);
-  ALARM2_FLAG = rtc.alarmFired(2);
-  rtc.clearAlarm(2);
+  //This typical content of this ISR is basically covered by the RTCLib library.
 }
 
 void overrideSenseIsr(){
@@ -90,18 +93,22 @@ void overrideSenseIsr(){
   // When the override sense is ON, the LED Enable pin must be set high (to turn on light in button)
   // When the override sense is ON, the rotary encoder must be programmed as a dimmer so it can tune the 
   // brightness of the light.
-  MANUAL_OVERRIDE = !MANUAL_OVERRIDE;
-  OVERRIDE_SENSE_FLAG = true;
+  if (millis() >= interrupt_timeout)
+  {
+    MANUAL_OVERRIDE = !MANUAL_OVERRIDE;
+    OVERRIDE_SENSE_FLAG = true;
+    interrupt_timeout = millis() + IRQ_TIMEOUT;
+  }
 }
 
 void acquireRotaryEncoderPos(void){
-  value += encoder->getValue();
+  enc_value += encoder->getValue();
 
-  if (value != last)
+  if (enc_value != last_enc_value)
   {
-    last = value;
+    last_enc_value = enc_value;
     Serial.print("Encoder Value: ");
-    Serial.println(value);
+    Serial.println(enc_value);
   }
 
   ClickEncoder::Button b = encoder->getButton();
@@ -134,25 +141,25 @@ void initRotaryEncoder(){
   Timer1.initialize(1000); // The timer will call its ISR every 1000 us (1ms)
   Timer1.attachInterrupt(timerIsr);
 
-  last = -1;
+  last_enc_value = -1;
 }
 
 void setNextWakeUpLightAlarm(int alarm_num){
   TimeSpan oneDay = TimeSpan(1, 0, 0, 0);
   DateTime t = rtc.now();
-  DateTime testDay = t + oneDay;
+  DateTime newAlarmDay = t + oneDay;
 
   int daysUntilNextAlarm = 1;
-  while (daysUntilNextAlarm < 8) //The alarm system is based on weekdays, so if there are no alarms in one week there will never be any alarms
+  if (daysUntilNextAlarm < 8) //The alarm system is based on weekdays, so if there are no alarms witin the first week there will never be any alarms
   {
-    uint8_t day_idx = testDay.dayOfTheWeek();
+    uint8_t day_idx = newAlarmDay.dayOfTheWeek();
     if (ALARM_SETTINGS.ALARM_DAYS[day_idx])
     {
       // The wakeup light is supposed to start on the day with index day_idx
       if (alarm_num == 1)
       {
         // A "start"-type alarm
-        DateTime alarmTime = DateTime(testDay.year(), testDay.month(), testDay.day(), ALARM_SETTINGS.START_HOUR, ALARM_SETTINGS.START_MINUTE, ALARM_SETTINGS.START_SECOND);
+        DateTime alarmTime = DateTime(newAlarmDay.year(), newAlarmDay.month(), newAlarmDay.day(), ALARM_SETTINGS.START_HOUR, ALARM_SETTINGS.START_MINUTE, ALARM_SETTINGS.START_SECOND);
         if (!rtc.setAlarm1(alarmTime,DS3231_A1_Day // this mode triggers the alarm when the day (day of week), hours, minutes and seconds match. See Doxygen for other options
                 ))
         {
@@ -169,7 +176,7 @@ void setNextWakeUpLightAlarm(int alarm_num){
       }else if (alarm_num == 2)
       {
         // An "end"-type alarm
-        DateTime alarmTime = DateTime(testDay.year(), testDay.month(), testDay.day(), ALARM_SETTINGS.END_HOUR, ALARM_SETTINGS.END_MINUTE, ALARM_SETTINGS.END_SECOND);
+        DateTime alarmTime = DateTime(newAlarmDay.year(), newAlarmDay.month(), newAlarmDay.day(), ALARM_SETTINGS.END_HOUR, ALARM_SETTINGS.END_MINUTE, ALARM_SETTINGS.END_SECOND);
         if (!rtc.setAlarm2(alarmTime,DS3231_A2_Day))
         {
           Serial.println("Error, alarm wasn't set!");
@@ -191,7 +198,7 @@ void setNextWakeUpLightAlarm(int alarm_num){
     }else
     {
       //Increment the tested variables
-      testDay = testDay + oneDay;
+      newAlarmDay = newAlarmDay + oneDay;
       daysUntilNextAlarm++;
     }    
   }
@@ -212,6 +219,8 @@ void initRTC(){
   {
     // this will adjust to the date and time at compilation
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // Uncomment next line to manually set an explicit time instead (May 27th 2021, 9:47 PM)
+    //rtc.adjust(DateTime(2021, 05, 27, 21, 47, 0));
   }
   rtc_millis.begin(rtc.now());
 
@@ -230,10 +239,14 @@ void initRTC(){
   // stop oscillating signals at SQW Pin
   // otherwise setAlarm1 will fail
   rtc.writeSqwPinMode(DS3231_OFF);
-
+  char buf1[] = "RTC Time: DD MM YYYY-hh:mm:ss";
+  Serial.println(rtc.now().toString(buf1));
+  setNextWakeUpLightAlarm(1);
+  setNextWakeUpLightAlarm(2);
+  /*
   // schedule an alarm 10 seconds in the future to verify that things are working as expected
   if (!rtc.setAlarm1(
-          rtc.now() + TimeSpan(10),
+          rtc.now() + TimeSpan(10), 
           DS3231_A1_Day // this mode triggers the alarm when the day (day of week), hours, minutes and seconds match. See Doxygen for other options
           ))
   {
@@ -241,7 +254,9 @@ void initRTC(){
   }
   else
   {
-    Serial.println("Alarm will happen in 10 seconds!");
+    Serial.println("Alarm 1 will happen in 10 seconds!");
+    char buf2[] = "RTC Time in 10: DD MM YYYY-hh:mm:ss";
+    Serial.println((rtc.now() + TimeSpan(10)).toString(buf2));
   }
 
   if (!rtc.setAlarm2(
@@ -252,8 +267,11 @@ void initRTC(){
   }
   else
   {
-    Serial.println("Alarm will happen in 11 seconds!");
+    Serial.println("Alarm 2 will happen in 60 seconds!");
+    char buf3[] = "RTC Time in 60: DD MM YYYY-hh:mm:ss";
+    Serial.println((rtc.now() + TimeSpan(60)).toString(buf3));
   }
+  */
 }
 
 void setup()
@@ -278,7 +296,10 @@ void setup()
   //Init variables
   MANUAL_OVERRIDE = false;
   OVERRIDE_SENSE_FLAG = false;
-  manual_pwm_value = 255;
+  last_enc_value = 0;
+  enc_value = MAX_ENCODER_VALUE;
+  last_manual_pwm_value = 0;
+  manual_pwm_value = BUTTON_LED_PWM_VALUE;
   auto_pwm_value = ALARM_SETTINGS.MIN_PWM;
   ALARM1_FLAG = false;
   ALARM2_FLAG = false;
@@ -287,11 +308,12 @@ void setup()
 
   //Calculate the delay (in ms) between each increment when dimming:
   int hr_to_min = ALARM_SETTINGS.DURATION_HOURS * 60;
-  int min_to_s = (ALARM_SETTINGS.DURATION_MINUTES + hr_to_min) * 60 ;
+  int min_to_s = (ALARM_SETTINGS.DURATION_MINUTES + hr_to_min) * 60  + ALARM_SETTINGS.DURATION_SECONDS;
+  pwm_dimming_delta = constrain((ALARM_SETTINGS.MAX_PWM - ALARM_SETTINGS.MIN_PWM) / min_to_s, 1, 255);
   //Dropping ms level resolution to avoid having to deal with overflow from millis() function.
   //int s_to_ms = (ALARM_SETTINGS.DURATION_SECONDS + min_to_s ) * 1000;
   //ms_between_pwm_increments = s_to_ms / (ALARM_SETTINGS.MAX_PWM - ALARM_SETTINGS.MIN_PWM);
-  s_between_pwm_increments = TimeSpan(min_to_s / (ALARM_SETTINGS.MAX_PWM - ALARM_SETTINGS.MIN_PWM));
+  s_between_pwm_increments = TimeSpan(max(min_to_s / (ALARM_SETTINGS.MAX_PWM - ALARM_SETTINGS.MIN_PWM),1));
   timestamp_prev_pwm_change = rtc_millis.now();
 }
 
@@ -304,26 +326,36 @@ void loop()
     //Normal operations. Wait for RTC alarms to occur.
     if(OVERRIDE_SENSE_FLAG){
       //The override button has been pushed to turn OFF the override functionality (seems backwards because OVERRIDE_SENSE_FLAG and MANUAL OVERRIDE are chaged in the same interrupt handler)
+      Serial.println("Override button released, light OFF! (Alarms are active)");
       Timer1.stop(); //Stop the rotary encoder readings to save power
       OVERRIDE_SENSE_FLAG = false;
       analogWrite(BUTTON_LED_PIN, 0);
+      Serial.print("Writing PWM ");
+      Serial.print(0);
+      Serial.println(" to LED driver.");
       analogWrite(LED_ENABLE_PIN, 0);
+
+
     }
-    if (ALARM1_FLAG)
+    if (rtc.alarmFired(1))
     {
+      Serial.println("Alarm 1 has gone off. Dimming UP!\n");
+      //reset flag
+      rtc.clearAlarm(1);
       //Start dimming up
       dimming_up = true;
       //Set time of next alarm
       setNextWakeUpLightAlarm(1);
+    }
+    else if (rtc.alarmFired(2))
+    {
+      Serial.println("Alarm 2 has gone off. Dimming DOWN!\n");
       //reset flag
-      ALARM1_FLAG = false;
-    }else if(ALARM2_FLAG){
-      //Start dimming down
+      rtc.clearAlarm(2);
+      //Start dimming down (NOTE: If this alarm occurs before the dimming-up phase is done, the dimming-up phase will complete before dimming down begins!)
       dimming_down = true;
       //Set time of next alarm
       setNextWakeUpLightAlarm(2);
-      //reset flag
-      ALARM2_FLAG = false;
     }
 
     if (dimming_up || dimming_down)
@@ -333,17 +365,25 @@ void loop()
       {
         if (dimming_up)
         {
-          auto_pwm_value = constrain(auto_pwm_value+1,0,ALARM_SETTINGS.MAX_PWM);
+          auto_pwm_value = constrain(auto_pwm_value + pwm_dimming_delta, ALARM_SETTINGS.MIN_PWM, ALARM_SETTINGS.MAX_PWM);
+          Serial.print("Auto-dimming PWM ");
+          Serial.print(auto_pwm_value);
+          Serial.println(" to LED driver.");
           if (auto_pwm_value == ALARM_SETTINGS.MAX_PWM)
           {
             dimming_up = false;
+            Serial.println("Done dimming up.");
           }
           analogWrite(LED_ENABLE_PIN,auto_pwm_value);
         }
         else if (dimming_down){
-          auto_pwm_value = constrain(auto_pwm_value - 1, 0, ALARM_SETTINGS.MAX_PWM);
+          auto_pwm_value = constrain(auto_pwm_value - pwm_dimming_delta, ALARM_SETTINGS.MIN_PWM, ALARM_SETTINGS.MAX_PWM);
+          Serial.print("Auto-dimming PWM ");
+          Serial.print(auto_pwm_value);
+          Serial.println(" to LED driver.");
           if (auto_pwm_value == ALARM_SETTINGS.MIN_PWM)
           {
+            Serial.println("Done dimming down.");
             dimming_down = false;
           }
           analogWrite(LED_ENABLE_PIN, auto_pwm_value);
@@ -355,21 +395,32 @@ void loop()
     
     
     
-  }else
+  }
+  else
   {
     //Manual override is initiated. The WakeUpLight functions as a normal lamp (ON) and the rotary encoder functions as a dimmer.
     if(OVERRIDE_SENSE_FLAG){
       //The override button is pushed. Activate the LED and use the rotary encoder as a PWM dimmer. (seems backwards because OVERRIDE_SENSE_FLAG and MANUAL OVERRIDE are chaged in the same interrupt handler)
+      last_enc_value = 0;
+      last_manual_pwm_value = 0;
+      
+      Serial.println("Overriding alarms, light ON!");
       Timer1.start();
       analogWrite(BUTTON_LED_PIN,BUTTON_LED_PWM_VALUE);
       OVERRIDE_SENSE_FLAG = false;
     }
     acquireRotaryEncoderPos();
-    //"value" is altered with a delta value: "value += encoder->getValue();". 
-    //TODO: Verify that the encoder can not go way out of range, but stays responsive to "downscrolling" if scrolled far "past" the max value.
-    manual_pwm_value = constrain(value, 0, MAX_ENCODER_VALUE);
-    manual_pwm_value = map(manual_pwm_value, 0, MAX_ENCODER_VALUE, 0, 255);
-    analogWrite(LED_ENABLE_PIN,manual_pwm_value);
+    //"enc_value" is altered with a delta value: "enc_value += encoder->getValue();".
+    enc_value = constrain(enc_value, 0, MAX_ENCODER_VALUE);
+    //map(value, fromLow, fromHigh, toLow, toHigh)
+    manual_pwm_value = map(enc_value, 0, MAX_ENCODER_VALUE, 6, 255); //Always leave some light on when in "override mode" so that the user doesn't forget to turn it off. Forgetting to switch off override mode would leave alarms inactive.
+    if (manual_pwm_value != last_manual_pwm_value){
+      Serial.print("Writing PWM ");
+      Serial.print(manual_pwm_value);
+      Serial.println(" to LED driver.");
+      analogWrite(LED_ENABLE_PIN,manual_pwm_value);
+      last_manual_pwm_value = manual_pwm_value;
+    }
   }
   
   
