@@ -47,20 +47,20 @@ struct AlarmSettings
 {
   // The days that the WakeUpLight shall start
   // Setting a value to false disables the alarm on the corresponding day of the week.
-  boolean ALARM_DAYS[7] = {true,  //Sunday
+  boolean ALARM_DAYS[7] = {false,  //Sunday
                            true,  //Monday
                            true,  //Tuesday
                            true,  //Wednesday
                            true,  //Thursday
                            true,  //Friday
-                           true}; //Saturday
+                           false}; //Saturday
   // The time of the day when the dimming shall start increasing (24 hour clock)
   uint8_t START_HOUR = 5;
-  uint8_t START_MINUTE = 45;
+  uint8_t START_MINUTE = 30;
   uint8_t START_SECOND = 0;
   // The time of the day when the dimming shall start decreasing (24 hour clock)
-  uint8_t END_HOUR = 8;
-  uint8_t END_MINUTE = 0;
+  uint8_t END_HOUR = 6;
+  uint8_t END_MINUTE = 30;
   uint8_t END_SECOND = 0;
   // The duration of the dimming process (both from start time to 100% and from end time to 0%)
   uint8_t DURATION_HOURS = 0;
@@ -150,7 +150,7 @@ void setNextWakeUpLightAlarm(int alarm_num){
   DateTime newAlarmDay = t + oneDay;
 
   int daysUntilNextAlarm = 1;
-  if (daysUntilNextAlarm < 8) //The alarm system is based on weekdays, so if there are no alarms witin the first week there will never be any alarms
+  while (daysUntilNextAlarm < 8) //The alarm system is based on weekdays, so if there are no alarms witin the first week there will never be any alarms
   {
     uint8_t day_idx = newAlarmDay.dayOfTheWeek();
     if (ALARM_SETTINGS.ALARM_DAYS[day_idx])
@@ -188,13 +188,12 @@ void setNextWakeUpLightAlarm(int alarm_num){
           Serial.print("An END alarm will happen at ");
           Serial.println(buf);
         }
-
       }else
       {
         //Invalid alarm number
         Serial.println("ERROR: Invalid alarm number to function 'setNextWakeUpLightAlarm(int alarm_num)'. Valid values for alarm_num are 1 and 2");
       }
-      
+      break;
     }else
     {
       //Increment the tested variables
@@ -219,8 +218,8 @@ void initRTC(){
   {
     // this will adjust to the date and time at compilation
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    // Uncomment next line to manually set an explicit time instead (May 27th 2021, 9:47 PM)
-    //rtc.adjust(DateTime(2021, 05, 27, 21, 47, 0));
+    // Uncomment next line to manually set an explicit time instead (June 2nd 2021, 20:55:20 PM)
+    rtc.adjust(DateTime(2021, 06, 02, 20, 55, 20));
   }
   rtc_millis.begin(rtc.now());
 
@@ -243,9 +242,9 @@ void initRTC(){
   Serial.println(rtc.now().toString(buf1));
   setNextWakeUpLightAlarm(1);
   setNextWakeUpLightAlarm(2);
-  /*
+  
   // schedule an alarm 10 seconds in the future to verify that things are working as expected
-  if (!rtc.setAlarm1(
+/*   if (!rtc.setAlarm1(
           rtc.now() + TimeSpan(10), 
           DS3231_A1_Day // this mode triggers the alarm when the day (day of week), hours, minutes and seconds match. See Doxygen for other options
           ))
@@ -270,8 +269,8 @@ void initRTC(){
     Serial.println("Alarm 2 will happen in 60 seconds!");
     char buf3[] = "RTC Time in 60: DD MM YYYY-hh:mm:ss";
     Serial.println((rtc.now() + TimeSpan(60)).toString(buf3));
-  }
-  */
+  } */
+  
 }
 
 void setup()
